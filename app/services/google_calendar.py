@@ -1,83 +1,130 @@
 # app/services/google_calendar.py
 from __future__ import annotations
 
-import os.path
-from datetime import datetime
-from typing import Optional, List
+import os
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any, Set
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 
-from app.schemas import Meeting
+from app.schemas import Meeting  # uses attendees: list[str]
 
-# Same scope as in gcal_auth.py
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+DEFAULT_TZ = "Europe/London"
+DEFAULT_CALENDAR_ID = "primary"
 
 
-def _get_credentials() -> Credentials:
-    """Load stored credentials from token.json."""
-    creds: Optional[Credentials] = None
+@dataclass(frozen=True)
+class CalendarCreateResult:
+    event_id: str
+    html_link: Optional[str] = None
+    hangout_link: Optional[str] = None
 
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
 
-    if not creds or not creds.valid:
-        # For safety: try refresh if possible
-        if creds and creds.expired and creds.refresh_token:
+# -----------------------------
+# Credentials
+# -----------------------------
+def _load_credentials(token_path: str = "token.json") -> Optional[Credentials]:
+    if os.path.exists(token_path):
+        return Credentials.from_authorized_user_file(token_path, SCOPES)
+    return None
+
+
+def _save_credentials(creds: Credentials, token_path: str = "token.json") -> None:
+    with open(token_path, "w") as f:
+        f.write(creds.to_json())
+
+
+def _get_credentials(token_path: str = "token.json") -> Credentials:
+    creds = _load_credentials(token_path)
+
+    if not creds:
+        raise RuntimeError(
+            f"No token found at '{token_path}'. Connect Google Calendar first."
+        )
+
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
             creds.refresh(Request())
+            _save_credentials(creds, token_path)
         else:
             raise RuntimeError(
-                "No valid Google credentials. Run `python gcal_auth.py` first."
+                "Google token invalid and cannot be refreshed. Reconnect Calendar."
             )
 
     return creds
 
 
-def get_calendar_service():
-    """Build and return a Google Calendar service client."""
-    creds = _get_credentials()
-    service = build("calendar", "v3", credentials=creds)
-    return service
+def get_calendar_service(token_path: str = "token.json"):
+    creds = _get_credentials(token_path)
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
-def create_event_from_meeting(meeting: Meeting) -> str:
+# -----------------------------
+# Attendees (FIXED)
+# -----------------------------
+def _build_attendees(meeting: Meeting) -> List[Dict[str, str]]:
     """
-    Create a Google Calendar event from a Meeting object.
-    Returns the created event's ID.
+    Converts meeting.attendees (List[str]) to Google Calendar format.
     """
-    service = get_calendar_service()
+    attendees: List[Dict[str, str]] = []
+    seen: Set[str] = set()
 
-    timezone = "Europe/London"  # adjust if needed
+    for email in meeting.attendees or []:
+        e = (email or "").strip()
+        if not e:
+            continue
 
-    # Build attendees list from meeting participants (using their emails)
-    attendees: List[dict] = []
-    for p in meeting.participants:
-        if p.email:
-            attendees.append({"email": p.email})
+        e_lc = e.lower()
+        if e_lc in seen:
+            continue
 
-    event_body = {
-        "summary": meeting.title,
+        seen.add(e_lc)
+        attendees.append({"email": e})
+
+    return attendees
+
+
+# -----------------------------
+# Event creation
+# -----------------------------
+def create_event_from_meeting(
+    meeting: Meeting,
+    calendar_id: str = DEFAULT_CALENDAR_ID,
+    timezone: str = DEFAULT_TZ,
+    send_updates: str = "all",  # "all" | "externalOnly" | "none"
+    token_path: str = "token.json",
+) -> CalendarCreateResult:
+    if not meeting.start_time or not meeting.end_time:
+        raise ValueError("Meeting must include start_time and end_time")
+
+    service = get_calendar_service(token_path)
+    attendees = _build_attendees(meeting)
+
+    event_body: Dict[str, Any] = {
+        "summary": meeting.title or "Meeting",
         "location": meeting.location or "",
-        "description": meeting.source_message or "",
-        "start": {
-            "dateTime": meeting.start_time.isoformat(),
-            "timeZone": timezone,
-        },
-        "end": {
-            "dateTime": meeting.end_time.isoformat(),
-            "timeZone": timezone,
-        },
-        "attendees": attendees,  # Google will email these people
-        "reminders": {
-            "useDefault": True,
-        },
+        "description": meeting.notes or "",
+        "start": {"dateTime": meeting.start_time, "timeZone": timezone},
+        "end": {"dateTime": meeting.end_time, "timeZone": timezone},
+        "attendees": attendees,
+        "reminders": {"useDefault": True},
     }
 
-    event = (
+    created = (
         service.events()
-        .insert(calendarId="primary", body=event_body, sendUpdates="all")
+        .insert(
+            calendarId=calendar_id,
+            body=event_body,
+            sendUpdates=send_updates,  # ✅ THIS sends emails
+        )
         .execute()
     )
 
-    return event.get("id")
+    return CalendarCreateResult(
+        event_id=created.get("id", ""),
+        html_link=created.get("htmlLink"),
+        hangout_link=created.get("hangoutLink"),
+    )

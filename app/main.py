@@ -1,41 +1,72 @@
 from fastapi import FastAPI
 from typing import List
 
+from app.app_factory import build_agent
+from app.runtime.handler import handle_message
+from app.schemas.messages import NormalizedMessage
+
 from app.schemas import User, Meeting
 from app.services.ai_parser import parse_message_to_meeting_request
 from app.services.scheduler import schedule_meeting
 from app.services.storage import storage
 
+# WhatsApp webhook router
+from app.services.whatsapp_webhook import router as whatsapp_router
+
 
 app = FastAPI(
     title="Demi – AI Scheduling Assistant",
-    version="0.1.0",
+    version="0.2.0",
 )
 
-# ----- Demo users (Kings & Blessed) -----
+agent, tools = build_agent()
 
+
+# ----------------------------------
+# Register WhatsApp Webhook
+# ----------------------------------
+app.include_router(whatsapp_router, prefix="/webhooks")
+
+
+# ----------------------------------
+# Root Endpoint
+# ----------------------------------
+@app.get("/")
+def root():
+    return {
+        "message": "Demi AI Scheduling Assistant is running successfully.",
+        "docs": "/docs",
+        "demo_parse_and_schedule": "/demo/parse-and-schedule",
+        "list_meetings": "/meetings",
+        "whatsapp_webhook": "/webhooks/whatsapp",
+    }
+
+
+# ----------------------------------
+# Demo Users (Kings & Blessed)
+# ----------------------------------
 KINGS = User(
     id="user_kings",
     name="Kings",
     handle="kings_handle",
-    email="kingsuthanaidogu@gmail.com"        # 👈 add your real email (same Gmail for Calendar)
+    email="kingsuthanaidogu@gmail.com",
 )
 
 BLESSED = User(
     id="user_blessed",
     name="Blessed",
     handle="blessed_handle",
-    email="kings@1st-kings.com"     # 👈 add Blessed’s real email
+    email="kings@1st-kings.com",
 )
 
 
+# ----------------------------------
+# AI Parsing + Scheduling Demo
+# ----------------------------------
 @app.post("/demo/parse-and-schedule", response_model=Meeting)
 def parse_and_schedule(message: str):
     """
-    Demo endpoint:
-    - Assume Kings is requester.
-    - Assume Blessed is the other participant.
-    - Parse message and schedule a meeting.
+    Demo endpoint for testing AI scheduling without WhatsApp.
     """
     req = parse_message_to_meeting_request(
         message=message,
@@ -46,11 +77,47 @@ def parse_and_schedule(message: str):
     return meeting
 
 
+# ----------------------------------
+# View All Meetings
+# ----------------------------------
 @app.get("/meetings", response_model=List[Meeting])
 def list_all_meetings():
     return storage.list_meetings()
 
 
+# ----------------------------------
+# View Meetings for Specific User
+# ----------------------------------
 @app.get("/meetings/{user_id}", response_model=List[Meeting])
 def list_meetings_for_user(user_id: str):
     return storage.get_meetings_for_user(user_id)
+
+
+@app.post("/agent/run")
+async def agent_run(payload: dict):
+    """
+    Unified agent endpoint: behaves the same as Streamlit.
+    Expected payload keys: user_id, thread_id, text, channel (optional), timezone(optional), metadata(optional)
+    """
+    msg = NormalizedMessage(
+        user_id=payload.get("user_id", "demo-user"),
+        thread_id=payload.get("thread_id", "demo-thread"),
+        text=payload.get("text", ""),
+        channel=payload.get("channel", "api"),
+        timezone=payload.get("timezone", "Europe/London"),
+        metadata=payload.get("metadata", {}) or {},
+    )
+    return await handle_message(agent, tools, msg)
+
+@app.post("/demo/parse-and-schedule")
+async def parse_and_schedule(message: str):
+    msg = NormalizedMessage(
+        user_id=KINGS.id,
+        thread_id="demo-thread-parse-and-schedule",
+        text=message,
+        channel="api",
+        timezone="Europe/London",
+        metadata={"demo": True},
+    )
+    return await handle_message(agent, tools, msg)
+
