@@ -1,0 +1,18 @@
+# Environment variables
+.env
+.env.*
+
+# Google OAuth
+token.json
+credentials.json
+
+# Secrets / keys
+*.key
+*.pem
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
