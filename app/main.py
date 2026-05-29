@@ -1,8 +1,10 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 
 from app.app_factory import build_agent
 from app.runtime.handler import handle_message
+from app.routes.chat import router as chat_router
 from app.schemas.messages import NormalizedMessage
 
 from app.schemas import User, Meeting
@@ -19,12 +21,24 @@ app = FastAPI(
     version="0.2.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 agent, tools = build_agent()
 
 
 # ----------------------------------
 # Register WhatsApp Webhook
 # ----------------------------------
+app.include_router(chat_router)
 app.include_router(whatsapp_router, prefix="/webhooks")
 
 
@@ -64,7 +78,7 @@ BLESSED = User(
 # AI Parsing + Scheduling Demo
 # ----------------------------------
 @app.post("/demo/parse-and-schedule", response_model=Meeting)
-def parse_and_schedule(message: str):
+async def parse_and_schedule(message: str):
     """
     Demo endpoint for testing AI scheduling without WhatsApp.
     """
@@ -73,7 +87,7 @@ def parse_and_schedule(message: str):
         requester=KINGS,
         other_participants=[BLESSED],
     )
-    meeting = schedule_meeting(req)
+    meeting = await schedule_meeting(req)
     return meeting
 
 
@@ -109,15 +123,14 @@ async def agent_run(payload: dict):
     )
     return await handle_message(agent, tools, msg)
 
-@app.post("/demo/parse-and-schedule")
-async def parse_and_schedule(message: str):
+@app.post("/demo/agent")
+async def demo_agent(message: str):
     msg = NormalizedMessage(
         user_id=KINGS.id,
-        thread_id="demo-thread-parse-and-schedule",
+        thread_id="demo-thread-agent",
         text=message,
         channel="api",
         timezone="Europe/London",
         metadata={"demo": True},
     )
     return await handle_message(agent, tools, msg)
-
